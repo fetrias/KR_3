@@ -43,15 +43,28 @@ class User(UserBase):
 
 class UserInDB(UserBase):
     hashed_password: str
+    role: str = "guest"
 
 
 class LoginPayload(BaseModel):
     username: str
     password: str
 
+
+class RegisterPayload(BaseModel):
+    username: str
+    password: str
+    role: str = "guest"
+
 # In-memory user store: username -> user in DB format.
 fake_users_db: dict[str, UserInDB] = {}
 rate_limit_store: dict[str, list[float]] = {}
+
+roles_permissions: dict[str, set[str]] = {
+    "admin": {"create", "read", "update", "delete"},
+    "user": {"read", "update"},
+    "guest": {"read"},
+}
 
 
 def get_user_by_username(username: str) -> UserInDB | None:
@@ -134,6 +147,28 @@ def verify_jwt_token(
     return username
 
 
+def get_current_user_from_token(username: str = Depends(verify_jwt_token)) -> UserInDB:
+    user = get_user_by_username(username)
+    if user is None:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid or missing token",
+        )
+    return user
+
+
+def require_roles(*allowed_roles: str):
+    def checker(user: UserInDB = Depends(get_current_user_from_token)) -> UserInDB:
+        if user.role not in allowed_roles:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Not enough permissions",
+            )
+        return user
+
+    return checker
+
+
 def enforce_rate_limit(request: Request, key: str, limit: int, per_seconds: int) -> None:
     client_ip = request.client.host if request.client else "unknown"
     now = time.time()
@@ -153,15 +188,19 @@ def enforce_rate_limit(request: Request, key: str, limit: int, per_seconds: int)
 
 
 @app.post("/register")
-def register(user: User, request: Request):
+def register(user: RegisterPayload, request: Request):
     enforce_rate_limit(request, key="register", limit=1, per_seconds=60)
 
     if get_user_by_username(user.username) is not None:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="User already exists")
 
+    if user.role not in roles_permissions:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid role")
+
     user_in_db = UserInDB(
         username=user.username,
         hashed_password=pwd_context.hash(user.password),
+        role=user.role,
     )
     fake_users_db[user.username] = user_in_db
     return JSONResponse(status_code=status.HTTP_201_CREATED, content={"message": "New user created"})
@@ -194,8 +233,23 @@ def jwt_login(payload: LoginPayload, request: Request):
 
 
 @app.get("/protected_resource")
-def protected_resource(_: str = Depends(verify_jwt_token)):
+def protected_resource(_: UserInDB = Depends(require_roles("admin", "user"))):
     return {"message": "Access granted"}
+
+
+@app.post("/admin/create_resource")
+def admin_create_resource(_: UserInDB = Depends(require_roles("admin"))):
+    return {"message": "Admin resource created"}
+
+
+@app.get("/user/read_resource")
+def user_read_resource(_: UserInDB = Depends(require_roles("admin", "user", "guest"))):
+    return {"message": "Resource read allowed"}
+
+
+@app.put("/user/update_resource")
+def user_update_resource(_: UserInDB = Depends(require_roles("admin", "user"))):
+    return {"message": "Resource update allowed"}
 
 
 if MODE == "DEV":
