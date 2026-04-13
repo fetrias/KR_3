@@ -1,11 +1,13 @@
 import os
 import secrets
+from datetime import datetime, timedelta, timezone
 
 from fastapi import Depends, FastAPI, HTTPException, status
 from fastapi.openapi.docs import get_swagger_ui_html
 from fastapi.openapi.utils import get_openapi
 from fastapi.responses import JSONResponse
-from fastapi.security import HTTPBasic, HTTPBasicCredentials
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBasic, HTTPBasicCredentials, HTTPBearer
+import jwt
 from passlib.context import CryptContext
 from pydantic import BaseModel
 from dotenv import load_dotenv
@@ -19,10 +21,14 @@ if MODE not in {"DEV", "PROD"}:
 
 DOCS_USER = os.getenv("DOCS_USER", "docs")
 DOCS_PASSWORD = os.getenv("DOCS_PASSWORD", "docs")
+JWT_SECRET = os.getenv("JWT_SECRET", "dev-secret")
+JWT_ALGORITHM = "HS256"
+JWT_EXPIRE_MINUTES = 30
 
 app = FastAPI(title="KR3 Task 6", docs_url=None, redoc_url=None, openapi_url=None)
 security = HTTPBasic()
 docs_security = HTTPBasic()
+bearer_security = HTTPBearer(auto_error=False)
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
 
@@ -36,6 +42,11 @@ class User(UserBase):
 
 class UserInDB(UserBase):
     hashed_password: str
+
+
+class LoginPayload(BaseModel):
+    username: str
+    password: str
 
 # In-memory user store: username -> user in DB format.
 fake_users_db: dict[str, UserInDB] = {}
@@ -77,6 +88,50 @@ def verify_docs_user(credentials: HTTPBasicCredentials = Depends(docs_security))
         )
 
 
+def authenticate_user(username: str, password: str) -> bool:
+    user = get_user_by_username(username)
+    return user is not None and pwd_context.verify(password, user.hashed_password)
+
+
+def create_access_token(subject: str) -> str:
+    payload = {
+        "sub": subject,
+        "exp": datetime.now(timezone.utc) + timedelta(minutes=JWT_EXPIRE_MINUTES),
+    }
+    return jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALGORITHM)
+
+
+def verify_jwt_token(
+    credentials: HTTPAuthorizationCredentials | None = Depends(bearer_security),
+) -> str:
+    if credentials is None or credentials.scheme.lower() != "bearer":
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid or missing token",
+        )
+
+    try:
+        payload = jwt.decode(
+            credentials.credentials,
+            JWT_SECRET,
+            algorithms=[JWT_ALGORITHM],
+        )
+    except jwt.PyJWTError:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid or missing token",
+        )
+
+    username = payload.get("sub")
+    if not isinstance(username, str) or not username:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid or missing token",
+        )
+
+    return username
+
+
 @app.post("/register")
 def register(user: User):
     if get_user_by_username(user.username) is not None:
@@ -93,6 +148,23 @@ def register(user: User):
 @app.get("/login")
 def login(user: UserInDB = Depends(auth_user)):
     return {"message": f"Welcome, {user.username}!"}
+
+
+@app.post("/login")
+def jwt_login(payload: LoginPayload):
+    if not authenticate_user(payload.username, payload.password):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid credentials",
+        )
+
+    token = create_access_token(payload.username)
+    return {"access_token": token}
+
+
+@app.get("/protected_resource")
+def protected_resource(_: str = Depends(verify_jwt_token)):
+    return {"message": "Access granted"}
 
 
 if MODE == "DEV":
