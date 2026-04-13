@@ -1,13 +1,28 @@
+import os
 import secrets
 
 from fastapi import Depends, FastAPI, HTTPException, status
+from fastapi.openapi.docs import get_swagger_ui_html
+from fastapi.openapi.utils import get_openapi
+from fastapi.responses import JSONResponse
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from passlib.context import CryptContext
 from pydantic import BaseModel
+from dotenv import load_dotenv
 
 
-app = FastAPI(title="KR3 Task 6")
+load_dotenv()
+
+MODE = os.getenv("MODE", "DEV").upper()
+if MODE not in {"DEV", "PROD"}:
+    raise RuntimeError("MODE must be DEV or PROD")
+
+DOCS_USER = os.getenv("DOCS_USER", "docs")
+DOCS_PASSWORD = os.getenv("DOCS_PASSWORD", "docs")
+
+app = FastAPI(title="KR3 Task 6", docs_url=None, redoc_url=None, openapi_url=None)
 security = HTTPBasic()
+docs_security = HTTPBasic()
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
 
@@ -51,6 +66,17 @@ def auth_user(credentials: HTTPBasicCredentials = Depends(security)) -> UserInDB
     return user
 
 
+def verify_docs_user(credentials: HTTPBasicCredentials = Depends(docs_security)) -> None:
+    is_valid_username = secrets.compare_digest(credentials.username, DOCS_USER)
+    is_valid_password = secrets.compare_digest(credentials.password, DOCS_PASSWORD)
+    if not (is_valid_username and is_valid_password):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Unauthorized",
+            headers={"WWW-Authenticate": "Basic"},
+        )
+
+
 @app.post("/register")
 def register(user: User):
     if get_user_by_username(user.username) is not None:
@@ -67,3 +93,20 @@ def register(user: User):
 @app.get("/login")
 def login(user: UserInDB = Depends(auth_user)):
     return {"message": f"Welcome, {user.username}!"}
+
+
+if MODE == "DEV":
+
+    @app.get("/openapi.json", include_in_schema=False)
+    def openapi_json(_: None = Depends(verify_docs_user)):
+        schema = get_openapi(
+            title=app.title,
+            version="1.0.0",
+            description="KR3 API",
+            routes=app.routes,
+        )
+        return JSONResponse(schema)
+
+    @app.get("/docs", include_in_schema=False)
+    def docs(_: None = Depends(verify_docs_user)):
+        return get_swagger_ui_html(openapi_url="/openapi.json", title=f"{app.title} docs")
