@@ -12,6 +12,7 @@ import jwt
 from passlib.context import CryptContext
 from pydantic import BaseModel
 from dotenv import load_dotenv
+from database import get_db_connection
 
 
 load_dotenv()
@@ -187,8 +188,8 @@ def enforce_rate_limit(request: Request, key: str, limit: int, per_seconds: int)
     rate_limit_store[bucket_key] = attempts
 
 
-@app.post("/register")
-def register(user: RegisterPayload, request: Request):
+@app.post("/auth/register")
+def register_auth(user: RegisterPayload, request: Request):
     enforce_rate_limit(request, key="register", limit=1, per_seconds=60)
 
     if get_user_by_username(user.username) is not None:
@@ -204,6 +205,22 @@ def register(user: RegisterPayload, request: Request):
     )
     fake_users_db[user.username] = user_in_db
     return JSONResponse(status_code=status.HTTP_201_CREATED, content={"message": "New user created"})
+
+
+@app.post("/register")
+def register(user: User):
+    connection = get_db_connection()
+    try:
+        cursor = connection.cursor()
+        cursor.execute(
+            "INSERT INTO users (username, password) VALUES (?, ?)",
+            (user.username, user.password),
+        )
+        connection.commit()
+    finally:
+        connection.close()
+
+    return {"message": "User registered successfully!"}
 
 
 @app.get("/login")
